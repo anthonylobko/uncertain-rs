@@ -1,139 +1,127 @@
-// Minimal implementation for recursive cached sampling
+// Implementation for recursive cached sampling with intermediate caching
 use crate::cache::dist_cache;
 use crate::{Uncertain, computation::ComputationNode};
 use std::collections::HashMap;
 
 impl Uncertain<f64> {
-    /// Take samples with recursive caching - ensures all leaf distributions
-    /// use cached samples and are evaluated with the same sample indices
+    /// Take samples with recursive caching - ensures all nodes (leaves and intermediates)
+    /// use cached samples and are evaluated consistently
     #[must_use]
     pub fn take_samples_cached_recursive(&self, count: usize) -> Vec<f64> {
         // First check if we already have this cached at the top level
-        // We need to check the cache but NOT insert an empty vec if not found
-        // So we can't use get_or_compute here
-        // For now, just skip this optimization since we can't directly check the cache
-
-        // Collect all leaf node IDs and pre-generate their cached samples
-        let leaf_map = collect_leaves(&self.node);
-
-        // Ensure all leaves have cached samples
-        for leaf_uncertain in leaf_map.values() {
-            // This will cache the samples if not already cached
-            let _ = leaf_uncertain.take_samples_cached(count);
+        // Try to get from cache without inserting empty vec
+        let cache = dist_cache();
+        if let Some(existing) = cache.get_samples(self.id, count) {
+            return existing;
         }
-
-        // Now generate samples by evaluating the computation graph
-        // but using cached leaf samples by index
-        let mut results = Vec::with_capacity(count);
-
-        for sample_idx in 0..count {
-            let value = evaluate_with_cached_leaves(&self.node, &leaf_map, sample_idx, count);
-            results.push(value);
-        }
-
-        // Cache the final result using get_or_compute pattern
-        // The result is already computed, so we just ensure it's cached
-        let _ = dist_cache().get_or_compute_samples(self.id, count, || results.clone());
-
-        results
+        
+        // Build a map of all nodes in the computation graph
+        let mut node_map = HashMap::new();
+        collect_all_nodes(&self.node, &mut node_map);
+        
+        // Recursively cache all nodes bottom-up
+        let result = cache_node_recursive(&self.node, &node_map, count);
+        
+        // Cache the final result
+        cache.get_or_compute_samples(self.id, count, || result.clone());
+        
+        result
     }
 }
 
-/// Collect all leaf nodes and create Uncertain wrappers for them
-fn collect_leaves(node: &ComputationNode<f64>) -> HashMap<uuid::Uuid, Uncertain<f64>> {
-    let mut leaves = HashMap::new();
-    collect_leaves_recursive(node, &mut leaves);
-    leaves
-}
-
-fn collect_leaves_recursive(
+/// Collect all nodes in the computation graph and create Uncertain wrappers
+fn collect_all_nodes(
     node: &ComputationNode<f64>,
-    leaves: &mut HashMap<uuid::Uuid, Uncertain<f64>>,
+    nodes: &mut HashMap<uuid::Uuid, ComputationNode<f64>>,
 ) {
     match node {
-        ComputationNode::Leaf { id, sample } => {
-            if !leaves.contains_key(id) {
-                // Create an Uncertain wrapper for this leaf
-                // This preserves the original UUID
-                let leaf_uncertain = Uncertain {
-                    id: *id,
-                    sample_fn: sample.clone(),
-                    node: node.clone(),
-                };
-                leaves.insert(*id, leaf_uncertain);
-            }
+        ComputationNode::Leaf { id, .. } => {
+            nodes.insert(*id, node.clone());
         }
         ComputationNode::BinaryOp { left, right, .. } => {
-            collect_leaves_recursive(left, leaves);
-            collect_leaves_recursive(right, leaves);
+            // First process children
+            collect_all_nodes(left, nodes);
+            collect_all_nodes(right, nodes);
+            // Note: BinaryOp nodes don't have their own UUID in the current structure
+            // They're identified by the Uncertain wrapper's UUID
         }
         ComputationNode::UnaryOp { operand, .. } => {
-            collect_leaves_recursive(operand, leaves);
+            collect_all_nodes(operand, nodes);
         }
         ComputationNode::Conditional {
             condition,
             if_true,
             if_false,
         } => {
-            // For f64, we don't expect conditionals, but handle anyway
-            collect_leaves_recursive_bool(condition, leaves);
-            collect_leaves_recursive(if_true, leaves);
-            collect_leaves_recursive(if_false, leaves);
+            collect_all_nodes_bool(condition, nodes);
+            collect_all_nodes(if_true, nodes);
+            collect_all_nodes(if_false, nodes);
         }
     }
 }
 
-fn collect_leaves_recursive_bool(
+fn collect_all_nodes_bool(
     _node: &ComputationNode<bool>,
-    _leaves: &mut HashMap<uuid::Uuid, Uncertain<f64>>,
+    _nodes: &mut HashMap<uuid::Uuid, ComputationNode<f64>>,
 ) {
-    // Skip bool nodes for now - they're not f64
+    // Skip bool nodes for now
 }
 
-/// Evaluate the computation graph using cached samples at the given index
-fn evaluate_with_cached_leaves(
+/// Recursively cache a node and all its dependencies
+fn cache_node_recursive(
     node: &ComputationNode<f64>,
-    leaf_map: &HashMap<uuid::Uuid, Uncertain<f64>>,
-    sample_idx: usize,
-    sample_count: usize,
-) -> f64 {
+    node_map: &HashMap<uuid::Uuid, ComputationNode<f64>>,
+    count: usize,
+) -> Vec<f64> {
     match node {
         ComputationNode::Leaf { id, sample } => {
-            // Try to get cached sample for this leaf
-            if let Some(leaf_uncertain) = leaf_map.get(id) {
-                // Get the cached samples for this leaf via the cache
-                let cached_samples =
-                    dist_cache().get_or_compute_samples(leaf_uncertain.id, sample_count, || {
-                        // This should not be called since we pre-cached
-                        leaf_uncertain.samples().take(sample_count).collect()
-                    });
-                if let Some(value) = cached_samples.get(sample_idx) {
-                    return *value;
-                }
-            }
-            // Fallback to direct sampling
-            sample()
+            // For leaves, use the standard caching mechanism
+            let leaf_uncertain = Uncertain {
+                id: *id,
+                sample_fn: sample.clone(),
+                node: node.clone(),
+            };
+            leaf_uncertain.take_samples_cached(count)
         }
-
+        
         ComputationNode::BinaryOp {
             left,
             right,
             operation,
         } => {
-            let left_val = evaluate_with_cached_leaves(left, leaf_map, sample_idx, sample_count);
-            let right_val = evaluate_with_cached_leaves(right, leaf_map, sample_idx, sample_count);
-            operation.apply(left_val, right_val)
-        }
-
-        ComputationNode::UnaryOp { operand, operation } => {
-            let operand_val =
-                evaluate_with_cached_leaves(operand, leaf_map, sample_idx, sample_count);
-            match operation {
-                crate::computation::UnaryOperation::Map(func) => func(operand_val),
-                crate::computation::UnaryOperation::Filter(_) => operand_val,
+            // First ensure children are cached
+            let left_samples = cache_node_recursive(left, node_map, count);
+            let right_samples = cache_node_recursive(right, node_map, count);
+            
+            // Now compute this node's samples using the cached children
+            let mut results = Vec::with_capacity(count);
+            for i in 0..count {
+                let result = operation.apply(left_samples[i], right_samples[i]);
+                results.push(result);
             }
+            
+            // Note: We can't cache this directly since BinaryOp doesn't have a UUID
+            // The caching happens at the Uncertain wrapper level
+            results
         }
-
+        
+        ComputationNode::UnaryOp { operand, operation } => {
+            // First ensure operand is cached
+            let operand_samples = cache_node_recursive(operand, node_map, count);
+            
+            // Now compute this node's samples using the cached operand
+            let mut results = Vec::with_capacity(count);
+            for i in 0..count {
+                let result = match operation {
+                    crate::computation::UnaryOperation::Map(func) => func(operand_samples[i]),
+                    crate::computation::UnaryOperation::Filter(_) => operand_samples[i],
+                };
+                results.push(result);
+            }
+            
+            results
+        }
+        
         ComputationNode::Conditional { .. } => {
             panic!("Conditional nodes not supported for f64 recursive caching")
         }

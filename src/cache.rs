@@ -362,6 +362,11 @@ impl DistributionCache {
         }
     }
 
+    /// Get samples from cache if they exist (without computing)
+    pub fn get_samples(&self, id: uuid::Uuid, sample_count: usize) -> Option<Vec<f64>> {
+        self.samples.get(&(id, sample_count))
+    }
+    
     /// Cache samples for reuse
     pub fn get_or_compute_samples<F>(
         &self,
