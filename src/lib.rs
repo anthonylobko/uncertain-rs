@@ -41,6 +41,7 @@ pub mod operations;
 pub mod statistics;
 pub mod traits;
 pub mod uncertain;
+pub mod recursive_cache;
 
 pub use hypothesis::HypothesisResult;
 pub use traits::Shareable;
