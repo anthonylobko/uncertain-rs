@@ -9,7 +9,12 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use instant::Instant;
 
 /// Global cache managers
 static STATS_CACHE: std::sync::LazyLock<StatisticsCache> =

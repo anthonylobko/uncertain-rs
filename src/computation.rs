@@ -3,6 +3,11 @@ use crate::traits::Shareable;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use instant::Instant;
+
 /// Adaptive sampling strategy for optimizing computation graph evaluation
 #[derive(Debug, Clone)]
 pub struct AdaptiveSampling {
@@ -1300,7 +1305,7 @@ impl GraphProfiler {
     where
         F: FnOnce() -> T,
     {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let result = func();
         let duration = start.elapsed();
 
